@@ -2,12 +2,13 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/labstack/echo"
-	"github.com/leshachaplin/Dispatcher/Kafka"
-	"github.com/leshachaplin/Dispatcher/Websocket"
-	"github.com/leshachaplin/Dispatcher/dispatcher"
+	"github.com/leshachaplin/KafkaTest/config"
+	"github.com/leshachaplin/KafkaTest/dispatcher"
+	"github.com/leshachaplin/KafkaTest/operations"
+	Kafka "github.com/leshachaplin/communicationUtils/kafka"
+	Websocket "github.com/leshachaplin/communicationUtils/websocket"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"os"
@@ -24,31 +25,6 @@ var (
 	mu         sync.Mutex
 )
 
-type ReadRole struct {
-	Role string
-}
-
-type WriteRole struct {
-}
-
-type ReadOperationMessage struct {
-}
-
-type WriteOperationMessage struct {
-}
-
-type WriteOperationMessageFromSecondKafka struct {
-}
-
-type CancelWriteFromSecondKafka struct {
-}
-
-type CancelWrite struct {
-}
-
-type CancelRead struct {
-}
-
 type Message struct {
 	Time string `json:"time"`
 }
@@ -63,43 +39,42 @@ var rootCmd = &cobra.Command{
 		signal.Notify(s, os.Interrupt)
 		done, cnsl := context.WithCancel(context.Background())
 		d := &dispatcher.Dispatcher{
-			Operation: make(chan dispatcher.Operation, 3),
+			Operation: make(chan dispatcher.Operation),
 		}
+		cfg := config.NewConfig()
+		e := echo.New()
 
-		w, err := Websocket.New(OB(d), done, serverPort)
+		_, err := Websocket.NewServer(OnMsg(d), done, e)
 		if err != nil {
-			log.Errorf("websocket not dial", err)
+			log.Errorf("server not connected")
 		}
 
 		go func(e *echo.Echo) {
 			e.Start(fmt.Sprintf(":%d", serverPort))
-		}(w.Echo)
+		}(e)
 
 		time.Sleep(time.Second * 10)
-		ws, err := w.NewWebsocketConnection()
+		ws, err := Websocket.NewClient(cfg.Origin, cfg.Url)
 		if err != nil {
 			log.Errorf("websocket not dial", err)
 		}
 		defer ws.Close()
 
-		k, err := Kafka.New("time115", 9092, strconv.FormatBool(isWatcher))
-		defer k.Close()
-
-		k2, err := Kafka.New("time114", 9092, strconv.FormatBool(!isWatcher))
+		k2, err := Kafka.New("time200", cfg.KafkaUrl, strconv.FormatBool(!isWatcher))
 
 		d.OnOperation = func(operation dispatcher.Operation) {
 			switch operation.(type) {
-			case ReadRole:
+			case operations.ReadRole:
 				{
 					fmt.Println("READ ROLE")
 					go func() {
 						fmt.Println("read role work")
-						role := operation.(ReadRole)
+						role := operation.(operations.ReadRole)
 						if role.Role == "read" {
 							fmt.Println("send read operation")
-							d.Operation <- ReadOperationMessage{}
+							d.Operation <- operations.ReadOperationMessage{}
 							if d.CancelWrite != nil {
-								d.CancelWrite <- CancelWriteFromSecondKafka{}
+								d.CancelWrite <- operations.CancelWrite{}
 								fmt.Println("send cancel write")
 							} else {
 								d.CancelWrite = make(chan dispatcher.Operation)
@@ -108,11 +83,10 @@ var rootCmd = &cobra.Command{
 							}
 						} else {
 							fmt.Println("send write operation")
-							d.Operation <- WriteOperationMessage{}
-							d.Operation <- WriteOperationMessageFromSecondKafka{}
+							d.Operation <- operations.WriteOperationMessage{}
 
 							if d.CancelRead != nil {
-								d.CancelRead <- CancelRead{}
+								d.CancelRead <- operations.CancelRead{}
 								fmt.Println("send cancel read")
 							} else {
 								d.CancelRead = make(chan dispatcher.Operation)
@@ -122,55 +96,7 @@ var rootCmd = &cobra.Command{
 						}
 					}()
 				}
-			case WriteRole:
-				{
-					fmt.Println("WRITE ROLE")
-					go func() {
-						fmt.Println(fmt.Sprintf("i'am watcher %v change role %d", isWatcher, clientPort))
-						mes := "read"
-						if isWatcher {
-							mes = "write"
-							isWatcher = false
-						} else {
-							isWatcher = true
-						}
-						if _, err := ws.Write([]byte(mes)); err != nil {
-							log.Errorf("message not send", err)
-						}
-
-						if !isWatcher { //????????????????????????????????????????????????????????????????
-							if d.CancelRead != nil {
-								d.CancelRead <- CancelRead{}
-								fmt.Println("send cancel READ")
-							} else {
-								d.CancelRead = make(chan dispatcher.Operation)
-								d.CancelRead <- CancelRead{}
-								fmt.Println("CANCEL READ")
-							}
-
-							d.Operation <- WriteOperationMessage{}
-							d.Operation <- WriteOperationMessageFromSecondKafka{}
-							fmt.Println("send WRITE operation")
-						} else {
-							if d.CancelWrite != nil {
-								d.CancelWrite <- CancelWrite{}
-								d.CancelWrite <- CancelWriteFromSecondKafka{}
-								fmt.Println("send cancel WRITE")
-							} else {
-								d.CancelWrite = make(chan dispatcher.Operation)
-								d.CancelWrite <- CancelWrite{}
-								d.CancelWrite <- CancelWriteFromSecondKafka{}
-								fmt.Println("CANCEL WRITE")
-							}
-
-							d.Operation <- ReadOperationMessage{}
-							fmt.Println("send READ operation")
-
-						}
-					}()
-
-				}
-			case ReadOperationMessage:
+			case operations.ReadOperationMessage:
 				{
 					fmt.Println("read Message")
 					go func() {
@@ -184,11 +110,9 @@ var rootCmd = &cobra.Command{
 							default:
 								{
 									mes, err := k2.ReadMessage()
-									m, err := k.ReadMessage()
 									if err != nil {
 										log.Errorf("message not read", err)
 									}
-									fmt.Println(string(m))
 									fmt.Println(string(mes))
 
 									time.Sleep(time.Second)
@@ -197,7 +121,7 @@ var rootCmd = &cobra.Command{
 						}
 					}()
 				}
-			case WriteOperationMessage:
+			case operations.WriteOperationMessage:
 				{
 					fmt.Println("write Message")
 					go func() {
@@ -210,41 +134,6 @@ var rootCmd = &cobra.Command{
 								}
 							default:
 								{
-
-									msg, err := json.Marshal(map[string]string{
-										"time": time.Now().String(),
-									})
-									if err != nil {
-										log.Errorf("message not Send", err)
-									}
-									err = k.WriteMessage(msg)
-									if err != nil {
-										log.Errorf("message not Send", err)
-									}
-									fmt.Println("SEND MESSAGE")
-									time.Sleep(time.Second)
-								}
-							}
-						}
-					}()
-				}
-			case WriteOperationMessageFromSecondKafka:
-				{
-					fmt.Println("write Message")
-					go func() {
-						for {
-							select {
-							case <-d.CancelWrite:
-								{
-									fmt.Println("Cancel write")
-									return
-								}
-							default:
-								{
-
-									//msg, err := json.Marshal(map[string]string{
-									//	"time": time.Now().String(),
-									//})
 									if err != nil {
 										log.Errorf("message not Send", err)
 									}
@@ -253,7 +142,7 @@ var rootCmd = &cobra.Command{
 										log.Errorf("message not Send", err)
 									}
 									fmt.Println("SEND MESSAGE FFROM K2")
-									time.Sleep(time.Second * 3)
+									time.Sleep(time.Second * 1)
 								}
 							}
 						}
@@ -264,13 +153,10 @@ var rootCmd = &cobra.Command{
 
 		dispatcher.Do(d, done)
 
-		ManagerOfMessages(done, d)
-
 		if isWatcher {
-			d.Operation <- ReadOperationMessage{}
+			d.Operation <- operations.ReadOperationMessage{}
 		} else {
-			d.Operation <- WriteOperationMessage{}
-			d.Operation <- WriteOperationMessageFromSecondKafka{}
+			d.Operation <- operations.WriteOperationMessage{}
 		}
 
 		<-s
@@ -281,36 +167,16 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.PersistentFlags().BoolVar(&isWatcher, "watcher", false, "User role for app")
-	rootCmd.PersistentFlags().IntVar(&serverPort, "serverPort", 6774, "User role for app")
-	rootCmd.PersistentFlags().IntVar(&clientPort, "clientPort", 8668, "User role for app")
+	rootCmd.PersistentFlags().IntVar(&serverPort, "serverPort", 8888, "User role for app")
+	rootCmd.PersistentFlags().IntVar(&clientPort, "clientPort", 7777, "User role for app")
 }
 
 func Execute() error {
 	return rootCmd.Execute()
 }
 
-func ManagerOfMessages(ctx context.Context, d *dispatcher.Dispatcher) {
-	go func(ctx context.Context) {
-		roleTicker := time.NewTicker(time.Second * 30)
-		//messageTicker := time.NewTicker(time.Second * 5)
-		for {
-			select {
-			case <-roleTicker.C:
-				{
-					fmt.Println("tick to change role")
-					d.Operation <- WriteRole{}
-				}
-			case <-ctx.Done():
-				{
-					return
-				}
-			}
-		}
-	}(ctx)
-}
-
-func OB(dis *dispatcher.Dispatcher) func(msg string) {
+func OnMsg(dis *dispatcher.Dispatcher) func(msg string) {
 	return func(msg string) {
-		dis.Operation <- &ReadRole{Role: msg}
+		dis.Operation <- &operations.ReadRole{Role: msg}
 	}
 }
